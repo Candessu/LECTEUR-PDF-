@@ -1,0 +1,1238 @@
+name: Build Lecteur Rapide APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle 8.5
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Creer le projet Android
+        run: |
+          set -e
+          mkdir -p proj && cd proj
+          mkdir -p "$(dirname settings.gradle)"
+          cat > settings.gradle <<'EOF_SETTINGS'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "LecteurRapide"
+          include ':app'
+          EOF_SETTINGS
+          mkdir -p "$(dirname build.gradle)"
+          cat > build.gradle <<'EOF_ROOT'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          EOF_ROOT
+          mkdir -p "$(dirname gradle.properties)"
+          cat > gradle.properties <<'EOF_PROPS'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF_PROPS
+          mkdir -p "$(dirname app/build.gradle)"
+          cat > app/build.gradle <<'EOF_APP'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.lecteur.rapide'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.lecteur.rapide'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.8.0'
+          }
+          EOF_APP
+          mkdir -p "$(dirname app/src/main/AndroidManifest.xml)"
+          cat > app/src/main/AndroidManifest.xml <<'EOF_MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Lecteur Rapide"
+                  android:icon="@drawable/ic_launcher"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+                  android:hardwareAccelerated="true"
+                  android:allowBackup="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                          <category android:name="android.intent.category.BROWSABLE"/>
+                          <data android:scheme="content"/>
+                          <data android:scheme="file"/>
+                          <data android:mimeType="application/pdf"/>
+                          <data android:mimeType="text/plain"/>
+                          <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_MANIFEST
+          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher.xml)"
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF_ICON'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="120" android:viewportHeight="120">
+              <path android:fillColor="#D32F2F" android:pathData="M28,0H92A28,28 0 0 1 120,28V92A28,28 0 0 1 92,120H28A28,28 0 0 1 0,92V28A28,28 0 0 1 28,0Z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M36,22h32l18,18v58h-50z"/>
+              <path android:fillColor="#FFCDD2" android:pathData="M68,22v18h18z"/>
+              <path android:fillColor="#D32F2F" android:pathData="M45,54h32v6h-32zM45,68h32v6h-32zM45,82h20v6h-20z"/>
+          </vector>
+          EOF_ICON
+          mkdir -p "$(dirname app/src/main/java/com/lecteur/rapide/MainActivity.java)"
+          cat > app/src/main/java/com/lecteur/rapide/MainActivity.java <<'EOF_JAVA'
+          package com.lecteur.rapide;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.database.Cursor;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.OpenableColumns;
+          import android.util.Base64;
+          import android.view.View;
+          import android.view.Window;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+
+          import androidx.webkit.WebViewAssetLoader;
+
+          import org.json.JSONObject;
+
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.util.HashMap;
+          import java.util.Map;
+
+          public class MainActivity extends Activity {
+              private static final int REQ_OPEN = 1;
+              private static final int REQ_SAVE = 2;
+              private static final String HOME = "https://appassets.androidplatform.net/assets/index.html";
+
+              private WebView web;
+              private WebViewAssetLoader loader;
+              private volatile Uri currentUri;
+              private Uri startUri;
+              private String pendingB64;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  Window w = getWindow();
+                  w.setStatusBarColor(Color.parseColor("#1B1D21"));
+                  w.setNavigationBarColor(Color.parseColor("#1B1D21"));
+
+                  web = new WebView(this);
+                  web.setBackgroundColor(Color.parseColor("#1B1D21"));
+                  setContentView(web);
+
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(false);
+                  s.setAllowContentAccess(false);
+                  s.setSupportZoom(false);
+                  s.setBuiltInZoomControls(false);
+                  s.setTextZoom(100);
+                  s.setCacheMode(WebSettings.LOAD_DEFAULT);
+
+                  loader = new WebViewAssetLoader.Builder()
+                          .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                          .build();
+
+                  web.addJavascriptInterface(new Bridge(), "Android");
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          String p = u.getPath();
+                          if (p != null && p.startsWith("/userfile/")) {
+                              return serveUser();
+                          }
+                          return loader.shouldInterceptRequest(u);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView v, String url) {
+                          if (startUri != null) {
+                              Uri u = startUri;
+                              startUri = null;
+                              openFromUri(u);
+                          }
+                      }
+                  });
+
+                  web.loadUrl(HOME);
+                  handleIntent(getIntent());
+              }
+
+              @Override
+              protected void onNewIntent(Intent i) {
+                  super.onNewIntent(i);
+                  setIntent(i);
+                  handleIntent(i);
+                  Uri u = startUri;
+                  if (u != null) {
+                      startUri = null;
+                      openFromUri(u);
+                  }
+              }
+
+              private void handleIntent(Intent i) {
+                  if (i == null) return;
+                  Uri d = i.getData();
+                  if (d != null && Intent.ACTION_VIEW.equals(i.getAction())) {
+                      startUri = d;
+                  }
+              }
+
+              private WebResourceResponse serveUser() {
+                  try {
+                      Uri u = currentUri;
+                      if (u == null) return new WebResourceResponse("text/plain", "UTF-8", 404, "Not found", new HashMap<String, String>(), null);
+                      InputStream in = getContentResolver().openInputStream(u);
+                      Map<String, String> h = new HashMap<>();
+                      h.put("Cache-Control", "no-store");
+                      h.put("Access-Control-Allow-Origin", "*");
+                      return new WebResourceResponse("application/octet-stream", null, 200, "OK", h, in);
+                  } catch (Exception e) {
+                      return new WebResourceResponse("text/plain", "UTF-8", 500, "Error", new HashMap<String, String>(), null);
+                  }
+              }
+
+              private void openFromUri(Uri uri) {
+                  try {
+                      String name = "document";
+                      long size = 0;
+                      Cursor c = getContentResolver().query(uri, null, null, null, null);
+                      if (c != null) {
+                          try {
+                              if (c.moveToFirst()) {
+                                  int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                                  int si = c.getColumnIndex(OpenableColumns.SIZE);
+                                  if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni);
+                                  if (si >= 0 && !c.isNull(si)) size = c.getLong(si);
+                              }
+                          } finally {
+                              c.close();
+                          }
+                      } else if (uri.getLastPathSegment() != null) {
+                          name = uri.getLastPathSegment();
+                      }
+                      String mime = getContentResolver().getType(uri);
+                      // vérifie l'accès
+                      InputStream t = getContentResolver().openInputStream(uri);
+                      if (t != null) t.close();
+                      currentUri = uri;
+                      JSONObject o = new JSONObject();
+                      o.put("name", name);
+                      o.put("size", size);
+                      o.put("mime", mime == null ? "" : mime);
+                      o.put("uri", uri.toString());
+                      final String js = "window.__open(" + o.toString() + ")";
+                      web.post(new Runnable() {
+                          public void run() {
+                              web.evaluateJavascript(js, null);
+                          }
+                      });
+                  } catch (Exception e) {
+                      jsError("Impossible d'ouvrir ce fichier");
+                  }
+              }
+
+              private void jsError(final String m) {
+                  web.post(new Runnable() {
+                      public void run() {
+                          web.evaluateJavascript("window.__error&&window.__error(" + JSONObject.quote(m) + ")", null);
+                      }
+                  });
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (res != RESULT_OK || data == null || data.getData() == null) return;
+                  Uri uri = data.getData();
+                  if (req == REQ_OPEN) {
+                      try {
+                          getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                      } catch (Exception ignored) {
+                      }
+                      openFromUri(uri);
+                  } else if (req == REQ_SAVE) {
+                      try {
+                          byte[] bytes = Base64.decode(pendingB64, Base64.DEFAULT);
+                          OutputStream os = getContentResolver().openOutputStream(uri, "w");
+                          os.write(bytes);
+                          os.close();
+                          Toast.makeText(this, "Fichier enregistré", Toast.LENGTH_LONG).show();
+                      } catch (Exception e) {
+                          Toast.makeText(this, "Échec de l'enregistrement", Toast.LENGTH_LONG).show();
+                      }
+                      pendingB64 = null;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  web.evaluateJavascript("window.__back&&window.__back()", new ValueCallback<String>() {
+                      public void onReceiveValue(String v) {
+                          if (!"true".equals(v)) MainActivity.super.onBackPressed();
+                      }
+                  });
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (web != null) web.destroy();
+                  super.onDestroy();
+              }
+
+              private class Bridge {
+                  @JavascriptInterface
+                  public void openFile() {
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                              i.addCategory(Intent.CATEGORY_OPENABLE);
+                              i.setType("*/*");
+                              i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                                      "application/pdf", "text/*", "image/*",
+                                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                      "application/json", "application/xml"});
+                              i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                              startActivityForResult(i, REQ_OPEN);
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void openUri(final String uri) {
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              openFromUri(Uri.parse(uri));
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void saveFile(final String name, final String mime, final String b64) {
+                      pendingB64 = b64;
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                              i.addCategory(Intent.CATEGORY_OPENABLE);
+                              i.setType(mime);
+                              i.putExtra(Intent.EXTRA_TITLE, name);
+                              startActivityForResult(i, REQ_SAVE);
+                          }
+                      });
+                  }
+              }
+          }
+          EOF_JAVA
+          mkdir -p "$(dirname app/src/main/assets/index.html)"
+          cat > app/src/main/assets/index.html <<'EOF_HTML'
+          <!DOCTYPE html>
+          <html lang="fr">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+          <title>Lecteur Rapide</title>
+          <style>
+          *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+          html,body{margin:0;height:100%;background:#1b1d21;color:#eceff1;font-family:system-ui,Roboto,sans-serif;overflow:hidden}
+          button{font:inherit;color:inherit;background:#2b2e34;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
+          button:active{filter:brightness(1.3)}
+          [hidden]{display:none!important}
+          input,textarea{font:inherit;width:100%;padding:10px;border-radius:10px;border:1px solid #444;background:#111;color:#eee}
+          #home{height:100%;display:flex;flex-direction:column;padding:14px;gap:10px}
+          #home h1{margin:0;font-size:22px}
+          #home h1 small{font-weight:400;font-size:12px;color:#90a4ae;display:block}
+          #bOpen{background:#d32f2f;font-size:17px;padding:14px;font-weight:600}
+          #rlist{flex:1;overflow:auto;display:flex;flex-direction:column;gap:6px}
+          .ri{display:flex;align-items:center;gap:10px;background:#25282d;border-radius:12px;padding:10px}
+          .ri .ic{font-size:26px}
+          .ri .tx{flex:1;min-width:0}
+          .ri .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:15px}
+          .ri .mt{font-size:12px;color:#90a4ae}
+          .ri button{background:none;padding:6px 8px;font-size:18px}
+          #reader{position:fixed;inset:0;display:flex;flex-direction:column;background:#2a2d32}
+          #top{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#1b1d21;height:50px;flex:none}
+          #top button{background:none;font-size:20px;padding:6px 10px}
+          #title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:15px}
+          #body{flex:1;position:relative;min-height:0}
+          #viewer,#textview,#imgview{position:absolute;inset:0;overflow:auto;-webkit-overflow-scrolling:touch}
+          #viewer{touch-action:pan-x pan-y;background:#3a3d44}
+          #pages{width:max-content;min-width:100%;padding-bottom:130px;transform-origin:0 0}
+          .page{position:relative;margin:8px auto 0;background:#fff;box-shadow:0 1px 6px #0008}
+          .page canvas{display:block;background:#fff}
+          .night .page canvas{filter:invert(1) hue-rotate(180deg)}
+          .textLayer{position:absolute;inset:0;overflow:hidden;line-height:1;user-select:text;-webkit-user-select:text}
+          .textLayer span,.textLayer br{position:absolute;white-space:pre;color:transparent;transform-origin:0 0}
+          .textLayer ::selection{background:rgba(33,150,243,.35);color:transparent}
+          .ov{position:absolute;inset:0;pointer-events:none}
+          .ov .hl,.ov .ul,.ov .st{position:absolute}
+          .ov .hl{mix-blend-mode:multiply;opacity:.55}
+          .night .ov .hl{mix-blend-mode:normal;opacity:.35}
+          .ov .ul{border-bottom:2px solid}
+          .ov .st::after{content:"";position:absolute;left:0;right:0;top:50%;border-top:2px solid var(--c)}
+          .ov svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+          .ov .note{position:absolute;width:26px;height:26px;margin:-26px 0 0 -13px;font-size:22px;line-height:26px;text-align:center;pointer-events:auto;filter:drop-shadow(0 1px 2px #0008)}
+          .t-pen .ov,.t-note .ov{pointer-events:auto}
+          .t-pen .ov{touch-action:none}
+          .t-eraser .ov .hl,.t-eraser .ov .ul,.t-eraser .ov .st{pointer-events:auto;outline:1px dashed #f44}
+          .t-eraser .ov svg .hit{pointer-events:stroke}
+          #textview{background:#fafafa;color:#212121;padding:12px 14px 140px;font-size:16px;line-height:1.5;font-family:Georgia,serif}
+          .night #textview,#textview.night{background:#101214;color:#d7dae0}
+          .tchunk{white-space:pre-wrap;word-break:break-word;content-visibility:auto;contain-intrinsic-size:auto 600px}
+          #imgview{background:#111;text-align:center}
+          #imgview img{max-width:none;display:block;margin:0 auto}
+          #bot{flex:none;background:#1b1d21;padding:6px 6px calc(6px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:6px}
+          #bot .row{display:flex;gap:6px;overflow-x:auto;align-items:center;justify-content:center}
+          #bot .row button{min-width:44px;font-size:18px;padding:8px}
+          #bot button.on{background:#d32f2f}
+          .sw{width:30px;height:30px;border-radius:50%;border:3px solid transparent;flex:none;padding:0!important;min-width:30px!important}
+          .sw.on{border-color:#fff;background-clip:padding-box}
+          #pg{position:absolute;right:10px;bottom:10px;background:#000b;border-radius:16px;padding:6px 12px;font-size:13px;z-index:5}
+          #selbar{position:absolute;left:8px;right:8px;bottom:8px;display:flex;gap:6px;background:#000d;border-radius:14px;padding:8px;justify-content:center;z-index:9}
+          #selbar button{background:#37474f;font-size:14px}
+          #spanel{position:absolute;left:0;right:0;top:0;max-height:70%;display:flex;flex-direction:column;background:#1b1d21;z-index:8;padding:8px;gap:6px;box-shadow:0 4px 12px #000a}
+          #sres{overflow:auto;display:flex;flex-direction:column;gap:4px}
+          #sres div{background:#25282d;padding:8px;border-radius:8px;font-size:13px}
+          #sres b{color:#ffca28}
+          #modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50;padding:18px}
+          #modal .box{background:#25282d;border-radius:16px;padding:16px;width:100%;max-width:420px;max-height:85%;overflow:auto;display:flex;flex-direction:column;gap:10px}
+          #modal h3{margin:0;font-size:17px}
+          #modal .brow{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+          #modal .full{width:100%;text-align:left;padding:12px}
+          #modal textarea{min-height:110px}
+          #toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#000d;padding:10px 16px;border-radius:20px;font-size:14px;z-index:99;max-width:90%}
+          #busy{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:60;font-size:16px}
+          </style>
+          </head>
+          <body>
+          <div id="home">
+            <h1>Lecteur Rapide<small>PDF · DOCX · TXT · images — annoter sans ralentir</small></h1>
+            <button id="bOpen">📂 Ouvrir un fichier</button>
+            <input id="rq" placeholder="Rechercher dans les fichiers récents…">
+            <div id="rlist"></div>
+          </div>
+
+          <div id="reader" hidden>
+            <div id="top">
+              <button id="bBack">‹</button>
+              <div id="title"></div>
+              <button id="bSearch">🔍</button>
+              <button id="bMenu">⋮</button>
+            </div>
+            <div id="body">
+              <div id="spanel" hidden>
+                <div style="display:flex;gap:6px"><input id="sq" placeholder="Rechercher…"><button id="sGo">OK</button><button id="sX">✕</button></div>
+                <div id="sres"></div>
+              </div>
+              <div id="viewer" class="t-hand"><div id="pages"></div></div>
+              <div id="textview" hidden></div>
+              <div id="imgview" hidden><img id="img" alt=""></div>
+              <div id="pg" hidden></div>
+              <div id="selbar" hidden>
+                <button id="sHl">🖍 Surligner</button>
+                <button id="sUl">U̲ Souligner</button>
+                <button id="sSt">S̶ Barrer</button>
+                <button id="sCp">⧉ Copier</button>
+              </div>
+            </div>
+            <div id="bot">
+              <div class="row" id="tools">
+                <button data-tool="hand" title="Sélection / défilement">✋</button>
+                <button data-tool="pen" title="Stylo">✏️</button>
+                <button data-tool="note" title="Note">🗒️</button>
+                <button data-tool="eraser" title="Gomme">🧽</button>
+                <button id="bUndo" title="Annuler">↶</button>
+                <button id="bZm">−</button>
+                <button id="bZp">+</button>
+                <button id="bFit" title="Ajuster">⤢</button>
+                <button id="bNight" title="Mode nuit">🌙</button>
+              </div>
+              <div class="row" id="colors"></div>
+            </div>
+          </div>
+
+          <div id="modal" hidden></div>
+          <div id="busy" hidden></div>
+          <div id="toast" hidden></div>
+
+          <script src="lib/pdf.min.js"></script>
+          <script src="lib/pdf-lib.min.js"></script>
+          <script src="lib/mammoth.browser.min.js"></script>
+          <script>
+          (function(){
+          'use strict';
+          var $=function(s){return document.querySelector(s)};
+          var B=window.Android||{};
+          var ready=false, queue=null;
+          window.__open=function(f){ if(!ready){queue=f;return;} openFile(f); };
+          window.__error=function(m){ busy(false); toast(m); };
+          window.__back=function(){ return goBack(); };
+
+          /* ---------- utilitaires ---------- */
+          function LSget(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
+          function LSset(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+          function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e}
+          function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+          function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+          var tt=0;
+          function toast(m){var t=$('#toast');t.textContent=m;t.hidden=false;clearTimeout(tt);tt=setTimeout(function(){t.hidden=true},2600)}
+          function busy(m){var b=$('#busy');if(m){b.textContent=m;b.hidden=false}else b.hidden=true}
+          function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6)}
+          function fmtSize(n){if(!n)return '';if(n<1024)return n+' o';if(n<1048576)return (n/1024).toFixed(0)+' Ko';return (n/1048576).toFixed(1)+' Mo'}
+          function hexRgb(h){var n=parseInt(h.slice(1),16);return PDFLib.rgb(((n>>16)&255)/255,((n>>8)&255)/255,(n&255)/255)}
+          function b64(u8){var s='',c=0x8000;for(var i=0;i<u8.length;i+=c)s+=String.fromCharCode.apply(null,u8.subarray(i,i+c));return btoa(s)}
+
+          function dlg(title,o){
+            o=o||{};
+            return new Promise(function(res){
+              var m=$('#modal');m.innerHTML='';
+              var box=el('div','box');var h=el('h3');h.textContent=title;box.appendChild(h);
+              var inp=null;
+              if(o.html){var d=el('div');d.innerHTML=o.html;box.appendChild(d)}
+              if(o.input){inp=el(o.multi?'textarea':'input');inp.value=o.value||'';if(o.ph)inp.placeholder=o.ph;box.appendChild(inp)}
+              var row=el('div','brow');
+              (o.btns||[['OK',1]]).forEach(function(b){
+                var x=el('button',b[2]||'');x.textContent=b[0];
+                x.onclick=function(){m.hidden=true;res(inp&&b[1]===1?inp.value:b[1])};
+                row.appendChild(x);
+              });
+              box.appendChild(row);m.appendChild(box);m.hidden=false;
+              m.onclick=function(e){if(e.target===m){m.hidden=true;res(null)}};
+              if(inp)setTimeout(function(){inp.focus()},50);
+            });
+          }
+
+          /* ---------- état ---------- */
+          var cur=null, pdf=null, n=0, sizes=[], tops=[], pageEls=[], pstate=[], visible=new Set(), io=null;
+          var baseScale=1, zoom=1, tool='hand', color='#FFEB3B', anns=[], hist=[], night=LSget('night',false);
+          var text='', chunks=[], fontSize=LSget('fs',16), imgZoom=1, curPage=1;
+          var viewer=$('#viewer'), pagesEl=$('#pages'), tv=$('#textview'), iv=$('#imgview');
+          var COLORS=['#FFEB3B','#8BC34A','#29B6F6','#F48FB1','#FF7043','#212121'];
+
+          if(window.pdfjsLib){pdfjsLib.GlobalWorkerOptions.workerSrc='lib/pdf.worker.min.js'}
+
+          /* ---------- accueil / récents ---------- */
+          function recents(){return LSget('recents',[])}
+          function addRecent(f){
+            var r=recents().filter(function(x){return x.uri!==f.uri});
+            var old=recents().filter(function(x){return x.uri===f.uri})[0]||{};
+            r.unshift({uri:f.uri,name:f.name,size:f.size,t:Date.now(),fav:old.fav||false,pos:old.pos||0});
+            LSset('recents',r.slice(0,100));
+          }
+          function setPos(v){
+            if(!cur)return;
+            var r=recents();for(var i=0;i<r.length;i++)if(r[i].uri===cur.uri){r[i].pos=v;break}
+            LSset('recents',r);
+          }
+          function icon(name){var e=(name.split('.').pop()||'').toLowerCase();
+            if(e==='pdf')return '📕';if(e==='docx'||e==='doc')return '📘';if(/^(png|jpe?g|gif|webp|bmp)$/.test(e))return '🖼️';return '📄'}
+          function renderHome(){
+            var q=$('#rq').value.toLowerCase(),box=$('#rlist');box.innerHTML='';
+            var r=recents().filter(function(x){return x.name.toLowerCase().indexOf(q)>=0});
+            r.sort(function(a,b){return (b.fav?1:0)-(a.fav?1:0)});
+            if(!r.length){box.innerHTML='<div style="color:#90a4ae;text-align:center;margin-top:30px">Aucun fichier récent</div>';return}
+            r.forEach(function(x){
+              var d=el('div','ri');
+              d.innerHTML='<div class="ic">'+icon(x.name)+'</div><div class="tx"><div class="nm"></div><div class="mt"></div></div>';
+              d.querySelector('.nm').textContent=x.name;
+              d.querySelector('.mt').textContent=fmtSize(x.size)+' · '+new Date(x.t).toLocaleDateString('fr-FR');
+              var fav=el('button');fav.textContent=x.fav?'⭐':'☆';
+              fav.onclick=function(e){e.stopPropagation();var all=recents();all.forEach(function(y){if(y.uri===x.uri)y.fav=!y.fav});LSset('recents',all);renderHome()};
+              var del=el('button');del.textContent='✕';
+              del.onclick=function(e){e.stopPropagation();LSset('recents',recents().filter(function(y){return y.uri!==x.uri}));renderHome()};
+              d.appendChild(fav);d.appendChild(del);
+              d.onclick=function(){if(B.openUri)B.openUri(x.uri)};
+              box.appendChild(d);
+            });
+          }
+          $('#rq').oninput=renderHome;
+          $('#bOpen').onclick=function(){if(B.openFile)B.openFile();else toast('Disponible dans l’application')};
+
+          function goHome(){
+            closeDoc();$('#reader').hidden=true;$('#home').hidden=false;renderHome();
+          }
+          function goBack(){
+            var m=$('#modal');
+            if(!m.hidden){m.hidden=true;return true}
+            if(!$('#spanel').hidden){$('#spanel').hidden=true;return true}
+            if(!$('#reader').hidden){goHome();return true}
+            return false;
+          }
+          $('#bBack').onclick=goBack;
+
+          /* ---------- ouverture ---------- */
+          function U(){return '/userfile/'+Date.now()+'/'+encodeURIComponent(cur.name)}
+          function closeDoc(){
+            if(io){io.disconnect();io=null}
+            visible.clear();
+            if(pdf){try{pdf.destroy()}catch(e){}pdf=null}
+            pagesEl.innerHTML='';pageEls=[];pstate=[];
+            text='';chunks=[];tv.innerHTML='';iv.querySelector('img').removeAttribute('src');
+            cur=null;anns=[];hist=[];hideSel();
+          }
+          async function openFile(f){
+            closeDoc();busy('Ouverture…');
+            var ext=(f.name.split('.').pop()||'').toLowerCase(),mime=f.mime||'';
+            var kind=(ext==='pdf'||/pdf/.test(mime))?'pdf':(/^(png|jpe?g|gif|webp|bmp)$/.test(ext)||/^image\//.test(mime))?'img':(ext==='docx')?'docx':'text';
+            cur={name:f.name,size:f.size,uri:f.uri,ext:ext,kind:kind,key:f.name+'|'+f.size};
+            addRecent(f);
+            $('#home').hidden=true;$('#reader').hidden=false;$('#title').textContent=f.name;
+            anns=LSget('ann:'+cur.key,[]);
+            var pos=(recents()[0]||{}).pos||0;
+            viewer.hidden=kind!=='pdf';tv.hidden=!(kind==='text'||kind==='docx');iv.hidden=kind!=='img';
+            $('#pg').hidden=kind!=='pdf';
+            setToolbar();setTool('hand');applyNight();
+            try{
+              if(kind==='pdf')await openPdf(pos);
+              else if(kind==='img')openImg();
+              else await openText(pos);
+            }catch(e){
+              busy(false);toast('Erreur : '+(e&&e.message||e));goHome();return;
+            }
+            busy(false);
+          }
+          function setToolbar(){
+            var p=cur.kind==='pdf',t=(cur.kind==='text'||cur.kind==='docx');
+            document.querySelector('[data-tool=pen]').hidden=!p;
+            document.querySelector('[data-tool=note]').hidden=!p;
+            document.querySelector('[data-tool=eraser]').hidden=!(p||t);
+            $('#bUndo').hidden=!(p||t);
+            $('#bFit').hidden=cur.kind==='text'||cur.kind==='docx';
+            $('#colors').hidden=!(p||t);
+            document.querySelector('[data-tool=hand]').hidden=cur.kind==='img';
+            $('#bSearch').hidden=cur.kind==='img';
+          }
+
+          /* ---------- PDF ---------- */
+          async function openPdf(pos){
+            if(!window.pdfjsLib)throw new Error('Moteur PDF absent');
+            var task=pdfjsLib.getDocument({url:U(),isEvalSupported:false});
+            pdf=await task.promise;n=pdf.numPages;
+            var p1=await pdf.getPage(1),v=p1.getViewport({scale:1});
+            sizes=[null];for(var i=1;i<=n;i++)sizes.push([v.width,v.height]);
+            zoom=1;baseScale=Math.max(0.2,(viewer.clientWidth-16)/v.width);
+            pageEls=[null];pstate=[null];
+            var frag=document.createDocumentFragment();
+            for(i=1;i<=n;i++){
+              var e=el('div','page');e.dataset.n=i;
+              e.innerHTML='<canvas></canvas><div class="tl textLayer"></div><div class="ov"></div>';
+              frag.appendChild(e);pageEls.push(e);pstate.push({tok:0,done:false,rt:null,tl:null});
+            }
+            pagesEl.appendChild(frag);
+            layout(false);
+            io=new IntersectionObserver(function(es){
+              es.forEach(function(en){
+                var i=+en.target.dataset.n;
+                if(en.isIntersecting){visible.add(i);renderPage(i)}else{visible.delete(i);releasePage(i)}
+              });
+            },{root:viewer,rootMargin:'100% 0px'});
+            for(i=1;i<=n;i++)io.observe(pageEls[i]);
+            if(pos>1&&pos<=n)viewer.scrollTop=tops[pos]-8;
+            updatePage();
+          }
+          function layout(keep){
+            var a=1,off=0;
+            if(keep&&tops.length>1){a=pageAt(viewer.scrollTop);off=viewer.scrollTop-tops[a]}
+            var s=baseScale*zoom,y=8;tops=[0];
+            for(var i=1;i<=n;i++){
+              var w=sizes[i][0]*s,h=sizes[i][1]*s,e=pageEls[i];
+              e.style.width=w+'px';e.style.height=h+'px';
+              tops[i]=y;y+=h+8;
+            }
+            if(keep&&tops.length>1)viewer.scrollTop=tops[a]+off;
+          }
+          function pageAt(y){
+            var lo=1,hi=n;
+            while(lo<hi){var mid=(lo+hi+1)>>1;if(tops[mid]<=y)lo=mid;else hi=mid-1}
+            return lo;
+          }
+          async function renderPage(i){
+            var ps=pstate[i];if(ps.done)return;
+            var tok=++ps.tok;
+            try{
+              var page=await pdf.getPage(i);
+              if(tok!==ps.tok)return;
+              var v1=page.getViewport({scale:1});
+              if(Math.abs(v1.width-sizes[i][0])>0.5||Math.abs(v1.height-sizes[i][1])>0.5){sizes[i]=[v1.width,v1.height];layout(true)}
+              var s=baseScale*zoom,vp=page.getViewport({scale:s}),e=pageEls[i],cv=e.querySelector('canvas');
+              var dpr=Math.min(window.devicePixelRatio||1,2);
+              if(vp.width*vp.height*dpr*dpr>16e6)dpr=Math.sqrt(16e6/(vp.width*vp.height));
+              cv.width=Math.floor(vp.width*dpr);cv.height=Math.floor(vp.height*dpr);
+              cv.style.width=vp.width+'px';cv.style.height=vp.height+'px';
+              var rt=page.render({canvasContext:cv.getContext('2d',{alpha:false}),viewport:vp,transform:dpr!==1?[dpr,0,0,dpr,0,0]:null});
+              ps.rt=rt;await rt.promise;
+              if(tok!==ps.tok)return;
+              var tl=e.querySelector('.tl');tl.innerHTML='';tl.style.setProperty('--scale-factor',s);
+              var tr=pdfjsLib.renderTextLayer({textContentSource:page.streamTextContent(),container:tl,viewport:vp,textDivs:[]});
+              ps.tl=tr;await tr.promise;
+              if(tok!==ps.tok)return;
+              ps.done=true;drawAnns(i);
+            }catch(err){
+              if(!(err&&err.name==='RenderingCancelledException'))console.log(err);
+            }
+          }
+          function releasePage(i){
+            var ps=pstate[i];if(!ps)return;
+            ps.tok++;ps.done=false;
+            try{if(ps.rt)ps.rt.cancel()}catch(e){}
+            try{if(ps.tl)ps.tl.cancel()}catch(e){}
+            ps.rt=null;ps.tl=null;
+            var e=pageEls[i];
+            var cv=e.querySelector('canvas');cv.width=1;cv.height=1;
+            e.querySelector('.tl').innerHTML='';e.querySelector('.ov').innerHTML='';
+          }
+          function rerenderVisible(){visible.forEach(function(i){releasePage(i);renderPage(i)})}
+          function setZoom(nz,cx,cy){
+            nz=clamp(nz,0.5,6);if(Math.abs(nz-zoom)<0.001)return;
+            var r=nz/zoom,ox=viewer.scrollLeft+cx,oy=viewer.scrollTop+cy;
+            zoom=nz;layout(false);
+            viewer.scrollLeft=ox*r-cx;viewer.scrollTop=oy*r-cy;
+            rerenderVisible();updatePage();
+          }
+          var raf=0,posT=0;
+          viewer.addEventListener('scroll',function(){
+            if(!raf)raf=requestAnimationFrame(function(){raf=0;updatePage()});
+          },{passive:true});
+          function updatePage(){
+            if(!pdf)return;
+            curPage=pageAt(viewer.scrollTop+viewer.clientHeight*0.35);
+            $('#pg').textContent=curPage+' / '+n;
+            clearTimeout(posT);posT=setTimeout(function(){setPos(curPage)},600);
+          }
+          $('#pg').onclick=async function(){
+            var v=await dlg('Aller à la page',{input:true,value:String(curPage),ph:'1 – '+n,btns:[['Annuler',0],['Aller',1]]});
+            var p=parseInt(v,10);if(p>=1&&p<=n)viewer.scrollTop=tops[p]-8;
+          };
+          window.addEventListener('resize',function(){
+            if(cur&&cur.kind==='pdf'){baseScale=Math.max(0.2,(viewer.clientWidth-16)/sizes[1][0]);layout(true);rerenderVisible()}
+          });
+
+          /* pincer pour zoomer */
+          var pin=null;
+          viewer.addEventListener('touchstart',function(e){
+            if(cur&&cur.kind==='pdf'&&e.touches.length===2&&tool!=='pen'){
+              var a=e.touches[0],b=e.touches[1],r=viewer.getBoundingClientRect();
+              pin={d:Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY),f:1,cx:(a.clientX+b.clientX)/2-r.left,cy:(a.clientY+b.clientY)/2-r.top};
+              pagesEl.style.transformOrigin=(viewer.scrollLeft+pin.cx)+'px '+(viewer.scrollTop+pin.cy)+'px';
+            }
+          },{passive:true});
+          viewer.addEventListener('touchmove',function(e){
+            if(pin&&e.touches.length===2){
+              e.preventDefault();
+              var a=e.touches[0],b=e.touches[1];
+              pin.f=clamp(Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY)/pin.d,0.4,4);
+              pagesEl.style.transform='scale('+pin.f+')';
+            }
+          },{passive:false});
+          function pinEnd(e){
+            if(pin&&e.touches.length<2){
+              var p=pin;pin=null;pagesEl.style.transform='';
+              setZoom(zoom*p.f,p.cx,p.cy);
+            }
+          }
+          viewer.addEventListener('touchend',pinEnd);viewer.addEventListener('touchcancel',pinEnd);
+
+          /* ---------- annotations : dessin ---------- */
+          function saveAnns(){LSset('ann:'+cur.key,anns)}
+          function drawAnns(i){
+            var ov=pageEls[i].querySelector('.ov');ov.innerHTML='';
+            anns.forEach(function(a){if(a.p===i)ov.appendChild(annNode(a,i))});
+          }
+          function pct(v){return (v*100)+'%'}
+          function annNode(a,i){
+            var f=document.createDocumentFragment();
+            if(a.t==='hl'||a.t==='ul'||a.t==='st'){
+              a.r.forEach(function(r){
+                var d=el('div',a.t);
+                d.style.cssText='left:'+pct(r[0])+';top:'+pct(r[1])+';width:'+pct(r[2])+';height:'+pct(r[3])+';';
+                if(a.t==='hl')d.style.background=a.c;
+                else{d.style.borderColor=a.c;d.style.setProperty('--c',a.c)}
+                d.onclick=function(){if(tool==='eraser')delAnn(a.id)};
+                f.appendChild(d);
+              });
+            }else if(a.t==='ink'){
+              var W=sizes[i][0],H=sizes[i][1],ns='http://www.w3.org/2000/svg';
+              var svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 '+W+' '+H);
+              var dstr='M'+a.pts.map(function(p){return (p[0]*W).toFixed(1)+' '+(p[1]*H).toFixed(1)}).join('L');
+              var p1=document.createElementNS(ns,'path');p1.setAttribute('d',dstr);p1.setAttribute('fill','none');
+              p1.setAttribute('stroke',a.c);p1.setAttribute('stroke-width',a.lw||2.2);p1.setAttribute('stroke-linecap','round');p1.setAttribute('stroke-linejoin','round');
+              var p2=document.createElementNS(ns,'path');p2.setAttribute('d',dstr);p2.setAttribute('fill','none');
+              p2.setAttribute('stroke','transparent');p2.setAttribute('stroke-width',16);p2.setAttribute('class','hit');
+              p2.addEventListener('click',function(){if(tool==='eraser')delAnn(a.id)});
+              svg.appendChild(p1);svg.appendChild(p2);f.appendChild(svg);
+            }else if(a.t==='note'){
+              var d=el('div','note');d.textContent='🗒️';d.style.left=pct(a.x);d.style.top=pct(a.y);
+              d.onclick=function(){if(tool==='eraser')delAnn(a.id);else editNote(a)};
+              f.appendChild(d);
+            }
+            return f;
+          }
+          function addAnn(a){anns.push(a);hist.push({op:'add',id:a.id});saveAnns()}
+          function delAnn(id){
+            var k=anns.findIndex(function(a){return a.id===id});if(k<0)return;
+            var a=anns.splice(k,1)[0];hist.push({op:'del',a:a});saveAnns();refreshAnn(a);
+          }
+          function refreshAnn(a){
+            if(cur.kind==='pdf'){if(a.p&&pstate[a.p]&&pstate[a.p].done)drawAnns(a.p)}
+            else renderChunksFor(a);
+          }
+          $('#bUndo').onclick=function(){
+            var h=hist.pop();if(!h){toast('Rien à annuler');return}
+            if(h.op==='add'){var k=anns.findIndex(function(a){return a.id===h.id});if(k>=0){var a=anns.splice(k,1)[0];saveAnns();refreshAnn(a)}}
+            else{anns.push(h.a);saveAnns();refreshAnn(h.a)}
+          };
+          async function editNote(a){
+            var v=await dlg('Note',{input:true,multi:true,value:a.txt||'',btns:[['Supprimer','del','danger'],['Annuler',0],['OK',1]]});
+            if(v==='del')delAnn(a.id);
+            else if(v!==null&&v!==0){a.txt=v;saveAnns()}
+          }
+
+          /* stylo + note (délégation) */
+          var draw=null;
+          viewer.addEventListener('pointerdown',function(e){
+            if(tool!=='pen')return;
+            var ov=e.target.closest&&e.target.closest('.ov');if(!ov)return;
+            var pg=ov.parentElement,r=ov.getBoundingClientRect(),i=+pg.dataset.n;
+            var ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+            svg.setAttribute('viewBox','0 0 '+sizes[i][0]+' '+sizes[i][1]);
+            var path=document.createElementNS(ns,'path');path.setAttribute('fill','none');path.setAttribute('stroke',color);
+            path.setAttribute('stroke-width',2.2);path.setAttribute('stroke-linecap','round');path.setAttribute('stroke-linejoin','round');
+            svg.appendChild(path);ov.appendChild(svg);
+            draw={i:i,ov:ov,r:r,pts:[],path:path,svg:svg,W:sizes[i][0],H:sizes[i][1]};
+            try{ov.setPointerCapture(e.pointerId)}catch(x){}
+            addPt(e);e.preventDefault();
+          });
+          function addPt(e){
+            var d=draw,x=(e.clientX-d.r.left)/d.r.width,y=(e.clientY-d.r.top)/d.r.height,l=d.pts[d.pts.length-1];
+            if(l&&Math.abs(l[0]-x)<0.0012&&Math.abs(l[1]-y)<0.0012)return;
+            d.pts.push([+x.toFixed(5),+y.toFixed(5)]);
+            d.path.setAttribute('d','M'+d.pts.map(function(p){return (p[0]*d.W).toFixed(1)+' '+(p[1]*d.H).toFixed(1)}).join('L'));
+          }
+          viewer.addEventListener('pointermove',function(e){if(draw){addPt(e);e.preventDefault()}});
+          function endDraw(){
+            if(!draw)return;var d=draw;draw=null;d.svg.remove();
+            if(d.pts.length>1){addAnn({id:uid(),p:d.i,t:'ink',c:color,lw:2.2,pts:d.pts});drawAnns(d.i)}
+          }
+          viewer.addEventListener('pointerup',endDraw);viewer.addEventListener('pointercancel',endDraw);
+          viewer.addEventListener('click',async function(e){
+            if(tool!=='note')return;
+            var ov=e.target;if(!ov.classList||!ov.classList.contains('ov'))return;
+            var r=ov.getBoundingClientRect(),i=+ov.parentElement.dataset.n;
+            var x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;
+            var v=await dlg('Nouvelle note',{input:true,multi:true,ph:'Votre note…',btns:[['Annuler',0],['Ajouter',1]]});
+            if(v&&v.trim()){addAnn({id:uid(),p:i,t:'note',c:'#FFC107',x:+x.toFixed(5),y:+y.toFixed(5),txt:v.trim()});drawAnns(i)}
+          });
+
+          /* ---------- annotations : sélection de texte ---------- */
+          var selT=0;
+          document.addEventListener('selectionchange',function(){
+            clearTimeout(selT);
+            selT=setTimeout(function(){
+              var s=getSelection();
+              if(!cur||!s||s.isCollapsed||!s.rangeCount){hideSel();return}
+              var nd=s.anchorNode;if(nd&&nd.nodeType===3)nd=nd.parentNode;
+              if(nd&&nd.closest&&(nd.closest('#viewer')||nd.closest('#textview')))$('#selbar').hidden=false;else hideSel();
+            },180);
+          });
+          function hideSel(){$('#selbar').hidden=true}
+          function tap(b,fn){
+            b.addEventListener('touchstart',function(e){e.preventDefault();fn()},{passive:false});
+            b.addEventListener('mousedown',function(e){e.preventDefault();fn()});
+          }
+          tap($('#sHl'),function(){markup('hl')});
+          tap($('#sUl'),function(){markup('ul')});
+          tap($('#sSt'),function(){markup('st')});
+          tap($('#sCp'),function(){try{document.execCommand('copy');toast('Copié')}catch(e){}});
+          function markup(t){
+            var s=getSelection();if(!s.rangeCount||s.isCollapsed)return;
+            var rg=s.getRangeAt(0);
+            if(cur.kind==='pdf')markupPdf(rg,t);else markupText(rg,t);
+            s.removeAllRanges();hideSel();
+          }
+          function markupPdf(rg,t){
+            var by={};
+            Array.prototype.forEach.call(rg.getClientRects(),function(r){
+              if(r.width<1||r.height<1)return;
+              var cx=r.left+r.width/2,cy=r.top+r.height/2,pi=0;
+              visible.forEach(function(i){var b=pageEls[i].getBoundingClientRect();if(cx>=b.left&&cx<=b.right&&cy>=b.top&&cy<=b.bottom)pi=i});
+              if(!pi)return;
+              var b=pageEls[pi].getBoundingClientRect();
+              if(r.height>b.height*0.2)return;
+              (by[pi]=by[pi]||[]).push([(r.left-b.left)/b.width,(r.top-b.top)/b.height,r.width/b.width,r.height/b.height]);
+            });
+            Object.keys(by).forEach(function(k){
+              var rs=by[k].sort(function(a,b){return a[1]-b[1]||a[0]-b[0]}),out=[];
+              rs.forEach(function(r){
+                var l=out[out.length-1];
+                if(l&&Math.abs(l[1]-r[1])<l[3]*0.5&&r[0]<=l[0]+l[2]+0.012){
+                  var x2=Math.max(l[0]+l[2],r[0]+r[2]);l[0]=Math.min(l[0],r[0]);l[2]=x2-l[0];
+                  var y1=Math.min(l[1],r[1]),y2=Math.max(l[1]+l[3],r[1]+r[3]);l[1]=y1;l[3]=y2-y1;
+                }else out.push(r.slice());
+              });
+              addAnn({id:uid(),p:+k,t:t,c:color,r:out.map(function(r){return r.map(function(v){return +v.toFixed(5)})})});
+              drawAnns(+k);
+            });
+          }
+
+          /* ---------- texte / DOCX ---------- */
+          async function openText(pos){
+            var r=await fetch(U());var buf=await r.arrayBuffer();
+            if(cur.kind==='docx'){
+              if(!window.mammoth)throw new Error('Lecteur DOCX indisponible');
+              var o=await mammoth.extractRawText({arrayBuffer:buf});text=o.value;
+            }else{
+              try{text=new TextDecoder('utf-8',{fatal:true}).decode(buf)}catch(e){text=new TextDecoder('windows-1252').decode(buf)}
+            }
+            text=text.replace(/\r\n?/g,'\n');
+            chunks=[];var s=0;
+            while(s<text.length){
+              var e=Math.min(text.length,s+3000);
+              if(e<text.length){var k=text.indexOf('\n',e);e=(k<0||k-e>1500)?e:k+1}
+              chunks.push({s:s,e:e});s=e;
+            }
+            tv.style.fontSize=fontSize+'px';tv.innerHTML='';
+            var frag=document.createDocumentFragment();
+            chunks.forEach(function(c,i){var d=el('div','tchunk');d.dataset.i=i;d.innerHTML=chunkHtml(i);frag.appendChild(d)});
+            tv.appendChild(frag);
+            tv.scrollTop=pos*(tv.scrollHeight-tv.clientHeight);
+          }
+          tv.addEventListener('scroll',function(){
+            clearTimeout(posT);posT=setTimeout(function(){setPos(tv.scrollTop/Math.max(1,tv.scrollHeight-tv.clientHeight))},600);
+          },{passive:true});
+          function chunkHtml(i){
+            var c=chunks[i],as=anns.filter(function(a){return a.s!==undefined&&a.e>c.s&&a.s<c.e});
+            if(!as.length)return esc(text.slice(c.s,c.e));
+            var set={};set[c.s]=1;set[c.e]=1;
+            as.forEach(function(a){set[Math.max(a.s,c.s)]=1;set[Math.min(a.e,c.e)]=1});
+            var P=Object.keys(set).map(Number).sort(function(x,y){return x-y}),h='';
+            for(var k=0;k<P.length-1;k++){
+              var x=P[k],y=P[k+1],act=as.filter(function(a){return a.s<=x&&a.e>=y}),seg=esc(text.slice(x,y));
+              if(!act.length){h+=seg;continue}
+              var st='',deco=[],dc='';
+              act.forEach(function(a){
+                if(a.t==='hl')st+='background:'+a.c+'99;';
+                if(a.t==='ul'){deco.push('underline');dc=a.c}
+                if(a.t==='st'){deco.push('line-through');dc=a.c}
+              });
+              if(deco.length)st+='text-decoration:'+deco.join(' ')+';text-decoration-color:'+dc+';';
+              h+='<span class="ta" data-ids="'+act.map(function(a){return a.id}).join(',')+'" style="'+st+'">'+seg+'</span>';
+            }
+            return h;
+          }
+          function renderChunksFor(a){
+            if(a.s===undefined)return;
+            chunks.forEach(function(c,i){if(a.e>c.s&&a.s<c.e){var d=tv.children[i];if(d)d.innerHTML=chunkHtml(i)}});
+          }
+          function offsetIn(node,off){
+            var p=node.nodeType===3?node.parentNode:node,c=p.closest&&p.closest('.tchunk');
+            if(!c)return -1;
+            var r=document.createRange();r.selectNodeContents(c);r.setEnd(node,off);
+            return chunks[+c.dataset.i].s+r.toString().length;
+          }
+          function markupText(rg,t){
+            var s=offsetIn(rg.startContainer,rg.startOffset),e=offsetIn(rg.endContainer,rg.endOffset);
+            if(s<0||e<0||e<=s)return;
+            var a={id:uid(),t:t,c:color,s:s,e:e};addAnn(a);renderChunksFor(a);
+          }
+          tv.addEventListener('click',function(e){
+            if(tool!=='eraser')return;
+            var t=e.target.closest&&e.target.closest('.ta');if(!t)return;
+            t.dataset.ids.split(',').forEach(delAnn);
+          });
+          function rangeAt(from,to){
+            var ci=-1;chunks.forEach(function(c,i){if(from>=c.s&&from<c.e)ci=i});if(ci<0)return null;
+            var d=tv.children[ci],w=document.createTreeWalker(d,NodeFilter.SHOW_TEXT),pos=chunks[ci].s,rg=document.createRange(),started=false,nd;
+            while((nd=w.nextNode())){
+              var len=nd.nodeValue.length;
+              if(!started&&from<pos+len){rg.setStart(nd,from-pos);started=true}
+              if(started&&to<=pos+len){rg.setEnd(nd,to-pos);return rg}
+              pos+=len;
+            }
+            if(started){rg.setEnd(d,d.childNodes.length);return rg}
+            return null;
+          }
+
+          /* ---------- images ---------- */
+          function openImg(){
+            var im=iv.querySelector('img');imgZoom=1;
+            im.onload=function(){fitImg()};
+            im.src=U();
+          }
+          function fitImg(){var im=iv.querySelector('img');imgZoom=1;im.style.width=iv.clientWidth+'px'}
+          function zoomImg(f){var im=iv.querySelector('img');imgZoom=clamp(imgZoom*f,0.3,8);im.style.width=(iv.clientWidth*imgZoom)+'px'}
+
+          /* ---------- barre d'outils ---------- */
+          function setTool(t){
+            tool=t;
+            document.querySelectorAll('[data-tool]').forEach(function(b){b.classList.toggle('on',b.dataset.tool===t)});
+            viewer.className='t-'+t+(night?' night':'');
+            if(t!=='hand')hideSel();
+          }
+          document.querySelectorAll('[data-tool]').forEach(function(b){b.onclick=function(){setTool(b.dataset.tool)}});
+          (function(){
+            var box=$('#colors');
+            COLORS.forEach(function(c){
+              var b=el('button','sw');b.style.background=c;b.dataset.c=c;
+              b.onclick=function(){color=c;sync()};box.appendChild(b);
+            });
+            function sync(){document.querySelectorAll('.sw').forEach(function(b){b.classList.toggle('on',b.dataset.c===color)})}
+            sync();window.__syncColors=sync;
+          })();
+          function zoomBy(f){
+            if(!cur)return;
+            if(cur.kind==='pdf')setZoom(zoom*f,viewer.clientWidth/2,viewer.clientHeight/2);
+            else if(cur.kind==='img')zoomImg(f);
+            else{fontSize=clamp(Math.round(fontSize*f),10,40);LSset('fs',fontSize);tv.style.fontSize=fontSize+'px'}
+          }
+          $('#bZp').onclick=function(){zoomBy(1.25)};
+          $('#bZm').onclick=function(){zoomBy(0.8)};
+          $('#bFit').onclick=function(){
+            if(cur.kind==='pdf')setZoom(1,viewer.clientWidth/2,viewer.clientHeight/2);else fitImg();
+          };
+          function applyNight(){
+            viewer.className='t-'+tool+(night?' night':'');
+            tv.classList.toggle('night',night);
+            iv.style.filter=night?'brightness(.8)':'';
+          }
+          $('#bNight').onclick=function(){night=!night;LSset('night',night);applyNight()};
+
+          /* ---------- recherche ---------- */
+          var pageText={},sseq=0;
+          $('#bSearch').onclick=function(){$('#spanel').hidden=false;$('#sq').focus()};
+          $('#sX').onclick=function(){$('#spanel').hidden=true;sseq++};
+          $('#sGo').onclick=doSearch;
+          $('#sq').addEventListener('keydown',function(e){if(e.key==='Enter')doSearch()});
+          async function getText(i){
+            if(pageText[i]!==undefined)return pageText[i];
+            var p=await pdf.getPage(i),c=await p.getTextContent();
+            var t=c.items.map(function(s){return s.str}).join(' ');pageText[i]=t;return t;
+          }
+          async function doSearch(){
+            var q=$('#sq').value.trim().toLowerCase(),res=$('#sres'),seq=++sseq;res.innerHTML='';
+            if(!q)return;
+            var found=0;
+            function add(label,snip,fn){
+              found++;var d=el('div');d.innerHTML='<b>'+label+'</b> '+snip;d.onclick=function(){$('#spanel').hidden=true;fn()};res.appendChild(d);
+            }
+            function snippet(t,k,q){return esc(t.slice(Math.max(0,k-30),k))+'<mark>'+esc(t.substr(k,q.length))+'</mark>'+esc(t.slice(k+q.length,k+q.length+40))}
+            if(cur.kind==='pdf'){
+              var tick=el('div');tick.textContent='Recherche…';res.appendChild(tick);
+              for(var i=1;i<=n;i++){
+                if(seq!==sseq)return;
+                var t=await getText(i),k=t.toLowerCase().indexOf(q);
+                if(k>=0)(function(i,t,k){add('p. '+i,snippet(t,k,q),function(){viewer.scrollTop=tops[i]-8})})(i,t,k);
+                if(i%15===0)tick.textContent='Recherche… '+i+'/'+n+' ('+found+')';
+                if(found>=200)break;
+              }
+              tick.remove();
+            }else{
+              var lo=text.toLowerCase(),k=0,cnt=0;
+              while((k=lo.indexOf(q,k))>=0&&cnt<300){
+                (function(k){add('#'+(cnt+1),snippet(text,k,q),function(){
+                  var rg=rangeAt(k,k+q.length);
+                  if(rg){var s=getSelection();s.removeAllRanges();s.addRange(rg);
+                    var p=rg.startContainer.parentElement;if(p)p.scrollIntoView({block:'center'})}
+                })})(k);
+                cnt++;k+=q.length;
+              }
+            }
+            if(!found)res.innerHTML='<div>Aucun résultat</div>';
+          }
+
+          /* ---------- menu ---------- */
+          $('#bMenu').onclick=async function(){
+            if(!cur)return;
+            var isP=cur.kind==='pdf',btns=[];
+            if(isP){
+              btns.push(['💾 Enregistrer le PDF annoté','exp','full']);
+              btns.push(['✂️ Extraire des pages','ext','full']);
+              btns.push(['🗑 Supprimer des pages','delp','full']);
+            }
+            if(isP||cur.kind==='text'||cur.kind==='docx')btns.push(['📋 Liste des annotations','list','full']);
+            if(isP||cur.kind==='text'||cur.kind==='docx')btns.push(['🧹 Effacer toutes les annotations','clr','full']);
+            btns.push(['Fermer',0]);
+            var v=await dlg('Options',{btns:btns});
+            if(v==='exp')exportPdf();
+            else if(v==='ext')pagesOp(true);
+            else if(v==='delp')pagesOp(false);
+            else if(v==='list')listAnns();
+            else if(v==='clr'){
+              var ok=await dlg('Effacer tout ?',{html:'Toutes les annotations de ce fichier seront supprimées.',btns:[['Annuler',0],['Effacer',1,'danger']]});
+              if(ok===1){var old=anns;anns=[];hist=[];saveAnns();
+                if(isP)visible.forEach(drawAnns);else chunks.forEach(function(c,i){tv.children[i].innerHTML=chunkHtml(i)});
+                toast('Annotations effacées')}
+            }
+          };
+          function listAnns(){
+            var names={hl:'Surlignage',ul:'Soulignement',st:'Texte barré',ink:'Dessin',note:'Note'};
+            var html='';
+            if(!anns.length)html='Aucune annotation.';
+            anns.slice().sort(function(a,b){return (a.p||0)-(b.p||0)||(a.s||0)-(b.s||0)}).forEach(function(a,i){
+              var lbl=(a.p?'p. '+a.p:'')+' '+names[a.t]+(a.txt?' — '+esc(a.txt.slice(0,60)):'');
+              if(a.s!==undefined)lbl=names[a.t]+' — '+esc(text.slice(a.s,Math.min(a.e,a.s+50)));
+              html+='<div style="padding:6px 0;border-bottom:1px solid #444">'+lbl+'</div>';
+            });
+            dlg('Annotations ('+anns.length+')',{html:html,btns:[['Fermer',0]]});
+          }
+          function parseRanges(s,max){
+            var set={};
+            s.split(',').forEach(function(p){
+              p=p.trim();if(!p)return;
+              var m=p.match(/^(\d+)\s*-\s*(\d+)$/);
+              if(m){for(var i=+m[1];i<=+m[2];i++)if(i>=1&&i<=max)set[i]=1}
+              else if(/^\d+$/.test(p)&&+p>=1&&+p<=max)set[+p]=1;
+            });
+            return Object.keys(set).map(Number).sort(function(a,b){return a-b});
+          }
+          async function getBytes(){var r=await fetch(U());return new Uint8Array(await r.arrayBuffer())}
+          function saveOut(name,u8){
+            if(B.saveFile)B.saveFile(name,'application/pdf',b64(u8));else toast('Disponible dans l’application');
+          }
+          function baseName(){return cur.name.replace(/\.pdf$/i,'')}
+          async function pagesOp(extract){
+            var v=await dlg(extract?'Extraire des pages':'Supprimer des pages',{input:true,ph:'ex : 1-3, 5, 8-10',btns:[['Annuler',0],['OK',1]]});
+            if(!v)return;
+            var list=parseRanges(v,n);if(!list.length){toast('Pages invalides');return}
+            if(!extract&&list.length>=n){toast('Impossible de tout supprimer');return}
+            if(!window.PDFLib){toast('Module indisponible');return}
+            busy('Traitement…');
+            try{
+              var src=await PDFLib.PDFDocument.load(await getBytes(),{ignoreEncryption:true}),out;
+              if(extract){out=await PDFLib.PDFDocument.create();var cp=await out.copyPages(src,list.map(function(i){return i-1}));cp.forEach(function(p){out.addPage(p)})}
+              else{out=src;list.slice().reverse().forEach(function(i){out.removePage(i-1)})}
+              var bytes=await out.save();busy(false);
+              saveOut(baseName()+(extract?'_extrait.pdf':'_modifie.pdf'),bytes);
+            }catch(e){busy(false);toast('Erreur : '+e.message)}
+          }
+          async function exportPdf(){
+            if(!window.PDFLib){toast('Module indisponible');return}
+            busy('Préparation du PDF…');
+            try{
+              var P=PDFLib,doc=await P.PDFDocument.load(await getBytes(),{ignoreEncryption:true});
+              var pgs=doc.getPages(),font=await doc.embedFont(P.StandardFonts.Helvetica);
+              anns.forEach(function(a){
+                var pg=pgs[a.p-1];if(!pg)return;
+                var sz=pg.getSize(),W=sz.width,H=sz.height,col=hexRgb(a.c);
+                if(a.t==='hl')a.r.forEach(function(r){pg.drawRectangle({x:r[0]*W,y:H-(r[1]+r[3])*H,width:r[2]*W,height:r[3]*H,color:col,opacity:0.35})});
+                else if(a.t==='ul')a.r.forEach(function(r){var y=H-(r[1]+r[3])*H+1;pg.drawLine({start:{x:r[0]*W,y:y},end:{x:(r[0]+r[2])*W,y:y},thickness:1.2,color:col})});
+                else if(a.t==='st')a.r.forEach(function(r){var y=H-(r[1]+r[3]/2)*H;pg.drawLine({start:{x:r[0]*W,y:y},end:{x:(r[0]+r[2])*W,y:y},thickness:1.2,color:col})});
+                else if(a.t==='ink'){
+                  for(var i=1;i<a.pts.length;i++){
+                    var p=a.pts[i-1],q=a.pts[i];
+                    pg.drawLine({start:{x:p[0]*W,y:H-p[1]*H},end:{x:q[0]*W,y:H-q[1]*H},thickness:a.lw||2.2,color:col,lineCap:P.LineCapStyle?P.LineCapStyle.Round:undefined});
+                  }
+                }else if(a.t==='note'){
+                  var x=a.x*W,y=H-a.y*H;
+                  pg.drawRectangle({x:x-7,y:y,width:14,height:14,color:P.rgb(1,0.85,0.2),borderColor:P.rgb(0.6,0.45,0),borderWidth:0.8});
+                  var t=(a.txt||'').replace(/[^\x20-\xFF\n]/g,'?').split('\n'),lines=[];
+                  t.forEach(function(L){while(L.length>38){lines.push(L.slice(0,38));L=L.slice(38)}lines.push(L)});
+                  lines=lines.slice(0,12);
+                  var bx=Math.min(x+10,W-150),by=y-4-lines.length*9;
+                  pg.drawRectangle({x:bx-3,y:by-2,width:146,height:lines.length*9+6,color:P.rgb(1,0.97,0.75),opacity:0.92});
+                  lines.forEach(function(L,k){try{pg.drawText(L,{x:bx,y:y-10-k*9,size:7.5,font:font,color:P.rgb(0.1,0.1,0.1)})}catch(e){}});
+                }
+              });
+              var bytes=await doc.save();busy(false);
+              saveOut(baseName()+'_annote.pdf',bytes);
+            }catch(e){busy(false);toast('Erreur : '+e.message)}
+          }
+
+          /* ---------- démarrage ---------- */
+          renderHome();setTool('hand');
+          ready=true;
+          if(queue){var q=queue;queue=null;openFile(q)}
+          })();
+          </script>
+          </body>
+          </html>
+          EOF_HTML
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Telecharger les moteurs (PDF, export, DOCX)
+        run: |
+          set -e
+          cd proj/app/src/main/assets && mkdir -p lib && cd lib
+          curl -fsSL --retry 4 -o pdf.min.js https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js
+          curl -fsSL --retry 4 -o pdf.worker.min.js https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js
+          curl -fsSL --retry 4 -o pdf-lib.min.js https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js
+          curl -fsSL --retry 4 -o mammoth.browser.min.js https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js || echo '' > mammoth.browser.min.js
+          ls -la
+
+      - name: Compiler l'APK
+        run: |
+          cd proj
+          gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Publier l'APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lecteur-Rapide-APK
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
